@@ -1,107 +1,60 @@
-const { EmbedBuilder, PermissionsBitField } = require('discord.js');
-const db = require('../utils/database');
-const chatgpt = require('../utils/chatgpt');
+const { Events, EmbedBuilder } = require('discord.js');
+const leveling = require('../utils/leveling');
 const automod = require('../utils/automod');
+const autoresponder = require('../utils/autoresponder');
+const modmailSchema = require('../models/modmail');
+const chatgptChannelSchema = require('../models/chatgptChannels');
+const { askChatGPT } = require('../utils/ask-gpt');
 
-module.exports = async (message, client) => {
-  // Ignore bot messages
-  if (message.author.bot) return;
+module.exports = {
+  name: Events.MessageCreate,
 
-  const isDM = !message.guild;
+  async execute(message, client) {
+    if (message.author.bot || !message.guild) return;
 
-  // =======================
-  // 💌 MODMAIL SYSTEM (DM)
-  // =======================
-  if (isDM) {
-    const modmailInboxId = db.get(`modmail_inbox_${client.user.id}`);
-    if (!modmailInboxId) return;
+    const { guild, member, content } = message;
 
-    const inboxChannel = await client.channels.fetch(modmailInboxId).catch(() => null);
-    if (!inboxChannel) return;
+    // 🔒 ModMail incoming from DM
+    if (message.channel.type === 1) {
+      const modmailData = await modmailSchema.findOne({ userId: message.author.id });
+      if (!modmailData) return;
 
-    const embed = new EmbedBuilder()
-      .setAuthor({
-        name: message.author.tag,
-        iconURL: message.author.displayAvatarURL({ dynamic: true })
-      })
-      .setDescription(message.content || '*No text provided.*')
-      .setColor('Blurple')
-      .setFooter({ text: `User ID: ${message.author.id}` })
-      .setTimestamp();
+      const guild = client.guilds.cache.get(modmailData.guildId);
+      const modmailChannel = guild.channels.cache.get(modmailData.channelId);
 
-    inboxChannel.send({ embeds: [embed] });
-    return;
-  }
+      if (!modmailChannel) return;
 
-  const guildId = message.guild.id;
+      const embed = new EmbedBuilder()
+        .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL() })
+        .setDescription(message.content || '*(no content)*')
+        .setColor(0x00BFFF)
+        .setFooter({ text: `User ID: ${message.author.id}` });
 
-  // =========================
-  // 🧠 CHATGPT AUTO CHANNEL
-  // =========================
-  const chatChannels = db.get(`chatgpt_channels_${guildId}`) || [];
-  if (chatChannels.includes(message.channel.id)) {
-    await message.channel.sendTyping();
-    try {
-      const reply = await chatgpt.ask(message.content, message.author.id);
-      return message.reply({ content: reply });
-    } catch (e) {
-      console.error(e);
-      return message.reply('❌ Error while talking to ChatGPT.');
-    }
-  }
-
-  // =====================
-  // 🤖 AUTORESPONDER
-  // =====================
-  const responders = db.get(`autoresponders_${guildId}`) || [];
-  const msgLower = message.content.toLowerCase();
-  for (const { trigger, response } of responders) {
-    if (trigger && response && trigger.toLowerCase() === msgLower) {
-      return message.channel.send({ content: response });
-    }
-  }
-
-  // =============================
-  // 🚫 AUTOMODERATION SYSTEM
-  // =============================
-  const settings = db.get(`automod_${guildId}`) || {};
-  const member = message.member;
-
-  // Bypass check
-  const bypassRole = settings.bypassRole;
-  const isBypassed = (
-    message.member?.permissions.has(PermissionsBitField.Flags.Administrator) ||
-    (bypassRole && member.roles.cache.has(bypassRole))
-  );
-
-  if (!isBypassed) {
-    // === Block links ===
-    if (settings.blockLinks && /(https?:\/\/[^\s]+)/gi.test(message.content)) {
-      const result = await automod.takeAction(client, message, settings.linkAction || 'timeout');
-      if (result === 'deleted') return;
+      await modmailChannel.send({ embeds: [embed] });
+      return;
     }
 
-    // === Block words ===
-    if (settings.badWords?.length) {
-      const words = settings.badWords.map(w => w.toLowerCase());
-      for (const word of words) {
-        if (msgLower.includes(word)) {
-          const result = await automod.takeAction(client, message, settings.wordAction || 'timeout');
-          if (result === 'deleted') return;
-        }
+    // ⚙️ Automoderation
+    await automod(message);
+
+    // 🆙 Leveling system
+    await leveling(message);
+
+    // 🤖 Autoresponder
+    await autoresponder(message);
+
+    // 💬 ChatGPT Channel Auto-Response
+    const chatGPTConfig = await chatgptChannelSchema.findOne({ guildId: guild.id });
+    if (
+      chatGPTConfig &&
+      chatGPTConfig.channels.includes(message.channel.id) &&
+      !message.content.startsWith('/')
+    ) {
+      const response = await askChatGPT(content, message.author.id);
+      if (response) {
+        message.channel.sendTyping();
+        return message.reply({ content: response });
       }
     }
-
-    // === Anti-External Apps (VC Status/Spotify) ===
-    if (settings.antiApps) {
-      const activities = message.member.presence?.activities || [];
-      const flagged = activities.find(a =>
-        ['Spotify', 'FiveM', 'Custom'].some(app => a.name?.toLowerCase()?.includes(app.toLowerCase()))
-      );
-      if (flagged) {
-        const result = await automod.takeAction(client, message, settings.appAction || 'timeout');
-        if (result === 'deleted') return;
-      }
-    }
-  }
+  },
 };
