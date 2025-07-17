@@ -1,113 +1,131 @@
-const AutoModSettings = require('../models/AutoModSettings');
+const { Events, PermissionsBitField, InteractionType } = require('discord.js');
+const AutoModSettings = require('../models/AutoMod');
+const AutoRoleSettings = require('../models/AutoRole');
+const AutoResponder = require('../models/AutoResponder');
+const TicketSettings = require('../models/TicketSettings');
+const ModMailSettings = require('../models/ModMailSettings');
+const ChatGPTChannel = require('../models/ChatGPTChannel');
+const { generateGPTReply } = require('../utils/chatgpt');
 
 module.exports = {
-  name: 'interactionCreate',
+  name: Events.InteractionCreate,
   async execute(interaction, client) {
-    if (!interaction.isStringSelectMenu()) return;
+    try {
+      // --------- SLASH COMMANDS ---------
+      if (interaction.isChatInputCommand()) {
+        const command = client.slashCommands.get(interaction.commandName);
+        if (!command) return;
 
-    const { customId, values, guildId, member, guild } = interaction;
-    if (customId !== 'automod_setup_select') return;
+        // Owner-only commands (e.g., /setstatus)
+        if (command.ownerOnly && interaction.user.id !== '1186506712040099850') {
+          return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
+        }
 
-    if (!member.permissions.has('Administrator')) {
-      return interaction.reply({ content: '❌ You need Administrator permission to use this menu.', ephemeral: true });
-    }
+        // Permission check
+        if (command.permissions && !interaction.member.permissions.has(command.permissions)) {
+          return interaction.reply({ content: "❌ You lack the necessary permissions.", ephemeral: true });
+        }
 
-    const selected = values[0];
+        await command.execute(interaction, client);
+      }
 
-    let settings = await AutoModSettings.findOne({ guildId });
-    if (!settings) {
-      settings = new AutoModSettings({ guildId });
-    }
+      // --------- BUTTON HANDLING ---------
+      if (interaction.isButton()) {
+        const customId = interaction.customId;
 
-    switch (selected) {
-      case 'toggle_automod':
-        settings.enabled = !settings.enabled;
-        await settings.save();
-        return interaction.reply({ content: `✅ AutoMod is now **${settings.enabled ? 'Enabled' : 'Disabled'}**.`, ephemeral: true });
+        // Ticket creation
+        if (customId.startsWith('create_ticket')) {
+          const settings = await TicketSettings.findOne({ guildId: interaction.guild.id });
+          if (!settings) return interaction.reply({ content: 'Ticket system not configured.', ephemeral: true });
 
-      case 'block_links':
-        settings.blockLinks = !settings.blockLinks;
-        await settings.save();
-        return interaction.reply({ content: `🔗 Block Links is now **${settings.blockLinks ? 'Enabled' : 'Disabled'}**.`, ephemeral: true });
+          const category = interaction.guild.channels.cache.get(settings.categoryId);
+          const existing = interaction.guild.channels.cache.find(c => c.name === `ticket-${interaction.user.id}`);
+          if (existing) return interaction.reply({ content: 'You already have an open ticket.', ephemeral: true });
 
-      case 'block_external_apps':
-        settings.blockExternalApps = !settings.blockExternalApps;
-        await settings.save();
-        return interaction.reply({ content: `🚫 Anti-External Apps is now **${settings.blockExternalApps ? 'Enabled' : 'Disabled'}**.`, ephemeral: true });
-
-      case 'bypass_role':
-        return interaction.reply({
-          content: 'Please mention the bypass role (e.g., @trusted) within 30 seconds.',
-          ephemeral: true
-        }).then(() => {
-          const filter = m => m.mentions.roles.size > 0 && m.author.id === interaction.user.id;
-          const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
-
-          collector.on('collect', async m => {
-            const role = m.mentions.roles.first();
-            settings.bypassRoleId = role.id;
-            await settings.save();
-            m.reply({ content: `✅ Bypass role set to ${role}.`, ephemeral: true });
+          const ticketChannel = await interaction.guild.channels.create({
+            name: `ticket-${interaction.user.username}`,
+            type: 0, // Text channel
+            parent: category?.id,
+            permissionOverwrites: [
+              { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+              { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
+              { id: settings.supportRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+            ]
           });
 
-          collector.on('end', collected => {
-            if (!collected.size) interaction.followUp({ content: '⏱️ No role mentioned in time.', ephemeral: true });
-          });
-        });
+          interaction.reply({ content: `🎟️ Ticket created: ${ticketChannel}`, ephemeral: true });
+        }
 
-      case 'blocked_words':
-        return interaction.reply({
-          content: 'Please send the list of blocked words separated by commas (e.g., badword1,badword2):',
-          ephemeral: true
-        }).then(() => {
-          const filter = m => m.author.id === interaction.user.id;
-          const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
+        // ModMail creation
+        if (customId === 'create_modmail') {
+          const settings = await ModMailSettings.findOne({ guildId: interaction.guild.id });
+          if (!settings || !settings.channelId) {
+            return interaction.reply({ content: 'ModMail is not configured.', ephemeral: true });
+          }
 
-          collector.on('collect', async m => {
-            const words = m.content.split(',').map(w => w.trim().toLowerCase()).filter(Boolean);
-            settings.blockedWords = words;
-            await settings.save();
-            m.reply({ content: `✅ Blocked words updated.`, ephemeral: true });
-          });
+          const threadName = `modmail-${interaction.user.username}`;
+          const channel = await interaction.guild.channels.fetch(settings.channelId);
+          if (!channel) return interaction.reply({ content: 'ModMail channel missing.', ephemeral: true });
 
-          collector.on('end', collected => {
-            if (!collected.size) interaction.followUp({ content: '⏱️ No input received.', ephemeral: true });
-          });
-        });
-
-      case 'set_timeout':
-      case 'set_mute':
-      case 'set_kick':
-      case 'set_ban':
-        return interaction.reply({
-          content: `Please enter the punishment duration (e.g., 10m, 1h, or "off" to disable ${selected.replace('set_', '')}).`,
-          ephemeral: true
-        }).then(() => {
-          const filter = m => m.author.id === interaction.user.id;
-          const collector = interaction.channel.createMessageCollector({ filter, time: 30000, max: 1 });
-
-          collector.on('collect', async m => {
-            const input = m.content.toLowerCase();
-            const key = selected.replace('set_', '') + 'Action';
-
-            if (input === 'off') {
-              settings[key] = null;
-              await settings.save();
-              return m.reply({ content: `❌ ${selected.replace('set_', '')} action disabled.`, ephemeral: true });
-            }
-
-            settings[key] = input;
-            await settings.save();
-            m.reply({ content: `✅ Action set for ${selected.replace('set_', '')}: ${input}`, ephemeral: true });
+          const thread = await channel.threads.create({
+            name: threadName,
+            reason: `ModMail from ${interaction.user.tag}`,
+            type: 11 // Private thread
           });
 
-          collector.on('end', collected => {
-            if (!collected.size) interaction.followUp({ content: '⏱️ No input received.', ephemeral: true });
-          });
-        });
+          thread.send(`📬 New modmail from ${interaction.user} (ID: ${interaction.user.id})`);
+          interaction.reply({ content: 'ModMail created. We’ll contact you soon.', ephemeral: true });
+        }
+      }
 
-      default:
-        return interaction.reply({ content: '❌ Unknown selection.', ephemeral: true });
+      // --------- SELECT MENU HANDLING (GUI Panels) ---------
+      if (interaction.isStringSelectMenu()) {
+        const [menuType] = interaction.customId.split('_');
+
+        if (menuType === 'automod') {
+          const selected = interaction.values[0];
+          const settings = await AutoModSettings.findOne({ guildId: interaction.guild.id }) || new AutoModSettings({ guildId: interaction.guild.id });
+
+          if (selected === 'enable_links') settings.linkFiltering = true;
+          if (selected === 'disable_links') settings.linkFiltering = false;
+          if (selected === 'timeout_action') settings.defaultAction = 'timeout';
+          if (selected === 'kick_action') settings.defaultAction = 'kick';
+          if (selected === 'ban_action') settings.defaultAction = 'ban';
+          if (selected.startsWith('bypassrole_')) settings.bypassRole = selected.split('_')[1];
+
+          await settings.save();
+          return interaction.reply({ content: '✅ Automod settings updated.', ephemeral: true });
+        }
+
+        if (menuType === 'autorole') {
+          const settings = await AutoRoleSettings.findOne({ guildId: interaction.guild.id }) || new AutoRoleSettings({ guildId: interaction.guild.id });
+
+          for (const value of interaction.values) {
+            if (value.startsWith('bot_')) settings.botRole = value.split('_')[1];
+            else if (value.startsWith('human_')) settings.humanRole = value.split('_')[1];
+            else if (value === 'autorole_toggle') settings.enabled = !settings.enabled;
+          }
+
+          await settings.save();
+          return interaction.reply({ content: '✅ Autorole settings updated.', ephemeral: true });
+        }
+
+        if (menuType === 'autoresponder') {
+          // Future handling or GUI cleanup
+          return interaction.reply({ content: '✅ GUI options updated.', ephemeral: true });
+        }
+      }
+
+      // --------- MODAL, CONTEXT MENUS, AUTOCOMPLETE (future use) ---------
+      // Add any modal or autocomplete logic here if needed.
+
+    } catch (err) {
+      console.error(`❌ Interaction Error: ${err.stack}`);
+      if (interaction.reply) {
+        try {
+          await interaction.reply({ content: 'An error occurred while processing this interaction.', ephemeral: true });
+        } catch (_) {}
+      }
     }
   }
 };
