@@ -1,131 +1,170 @@
-const { Events, PermissionsBitField, InteractionType } = require('discord.js');
-const AutoModSettings = require('../models/AutoMod');
-const AutoRoleSettings = require('../models/AutoRole');
-const AutoResponder = require('../models/AutoResponder');
-const TicketSettings = require('../models/TicketSettings');
-const ModMailSettings = require('../models/ModMailSettings');
-const ChatGPTChannel = require('../models/ChatGPTChannel');
-const { generateGPTReply } = require('../utils/chatgpt');
+const {
+  ChannelType,
+  PermissionsBitField,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
+} = require('discord.js');
+const db = require('../../utils/database');
 
-module.exports = {
-  name: Events.InteractionCreate,
-  async execute(interaction, client) {
+module.exports = async (interaction, client) => {
+  // === Slash Command Execution ===
+  if (interaction.isChatInputCommand()) {
+    const command = client.commands.get(interaction.commandName);
+    if (!command) return;
     try {
-      // --------- SLASH COMMANDS ---------
-      if (interaction.isChatInputCommand()) {
-        const command = client.slashCommands.get(interaction.commandName);
-        if (!command) return;
-
-        // Owner-only commands (e.g., /setstatus)
-        if (command.ownerOnly && interaction.user.id !== '1186506712040099850') {
-          return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
-        }
-
-        // Permission check
-        if (command.permissions && !interaction.member.permissions.has(command.permissions)) {
-          return interaction.reply({ content: "❌ You lack the necessary permissions.", ephemeral: true });
-        }
-
-        await command.execute(interaction, client);
-      }
-
-      // --------- BUTTON HANDLING ---------
-      if (interaction.isButton()) {
-        const customId = interaction.customId;
-
-        // Ticket creation
-        if (customId.startsWith('create_ticket')) {
-          const settings = await TicketSettings.findOne({ guildId: interaction.guild.id });
-          if (!settings) return interaction.reply({ content: 'Ticket system not configured.', ephemeral: true });
-
-          const category = interaction.guild.channels.cache.get(settings.categoryId);
-          const existing = interaction.guild.channels.cache.find(c => c.name === `ticket-${interaction.user.id}`);
-          if (existing) return interaction.reply({ content: 'You already have an open ticket.', ephemeral: true });
-
-          const ticketChannel = await interaction.guild.channels.create({
-            name: `ticket-${interaction.user.username}`,
-            type: 0, // Text channel
-            parent: category?.id,
-            permissionOverwrites: [
-              { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-              { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-              { id: settings.supportRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
-            ]
-          });
-
-          interaction.reply({ content: `🎟️ Ticket created: ${ticketChannel}`, ephemeral: true });
-        }
-
-        // ModMail creation
-        if (customId === 'create_modmail') {
-          const settings = await ModMailSettings.findOne({ guildId: interaction.guild.id });
-          if (!settings || !settings.channelId) {
-            return interaction.reply({ content: 'ModMail is not configured.', ephemeral: true });
-          }
-
-          const threadName = `modmail-${interaction.user.username}`;
-          const channel = await interaction.guild.channels.fetch(settings.channelId);
-          if (!channel) return interaction.reply({ content: 'ModMail channel missing.', ephemeral: true });
-
-          const thread = await channel.threads.create({
-            name: threadName,
-            reason: `ModMail from ${interaction.user.tag}`,
-            type: 11 // Private thread
-          });
-
-          thread.send(`📬 New modmail from ${interaction.user} (ID: ${interaction.user.id})`);
-          interaction.reply({ content: 'ModMail created. We’ll contact you soon.', ephemeral: true });
-        }
-      }
-
-      // --------- SELECT MENU HANDLING (GUI Panels) ---------
-      if (interaction.isStringSelectMenu()) {
-        const [menuType] = interaction.customId.split('_');
-
-        if (menuType === 'automod') {
-          const selected = interaction.values[0];
-          const settings = await AutoModSettings.findOne({ guildId: interaction.guild.id }) || new AutoModSettings({ guildId: interaction.guild.id });
-
-          if (selected === 'enable_links') settings.linkFiltering = true;
-          if (selected === 'disable_links') settings.linkFiltering = false;
-          if (selected === 'timeout_action') settings.defaultAction = 'timeout';
-          if (selected === 'kick_action') settings.defaultAction = 'kick';
-          if (selected === 'ban_action') settings.defaultAction = 'ban';
-          if (selected.startsWith('bypassrole_')) settings.bypassRole = selected.split('_')[1];
-
-          await settings.save();
-          return interaction.reply({ content: '✅ Automod settings updated.', ephemeral: true });
-        }
-
-        if (menuType === 'autorole') {
-          const settings = await AutoRoleSettings.findOne({ guildId: interaction.guild.id }) || new AutoRoleSettings({ guildId: interaction.guild.id });
-
-          for (const value of interaction.values) {
-            if (value.startsWith('bot_')) settings.botRole = value.split('_')[1];
-            else if (value.startsWith('human_')) settings.humanRole = value.split('_')[1];
-            else if (value === 'autorole_toggle') settings.enabled = !settings.enabled;
-          }
-
-          await settings.save();
-          return interaction.reply({ content: '✅ Autorole settings updated.', ephemeral: true });
-        }
-
-        if (menuType === 'autoresponder') {
-          // Future handling or GUI cleanup
-          return interaction.reply({ content: '✅ GUI options updated.', ephemeral: true });
-        }
-      }
-
-      // --------- MODAL, CONTEXT MENUS, AUTOCOMPLETE (future use) ---------
-      // Add any modal or autocomplete logic here if needed.
-
+      await command.execute(interaction, client);
     } catch (err) {
-      console.error(`❌ Interaction Error: ${err.stack}`);
-      if (interaction.reply) {
-        try {
-          await interaction.reply({ content: 'An error occurred while processing this interaction.', ephemeral: true });
-        } catch (_) {}
+      console.error(err);
+      await interaction.reply({
+        content: '❌ An error occurred while executing the command.',
+        ephemeral: true
+      });
+    }
+  }
+
+  // === Ticket Category Selection ===
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'ticket_category_select') {
+      const category = interaction.values[0];
+      const ticketData = db.get(`ticket_category_${interaction.guild.id}_${category}`);
+      if (!ticketData) {
+        return interaction.reply({ content: '❌ Ticket category not found.', ephemeral: true });
       }
+
+      const existing = interaction.guild.channels.cache.find(
+        c => c.topic === `TicketUser:${interaction.user.id}`
+      );
+      if (existing) {
+        return interaction.reply({
+          content: '❌ You already have an open ticket.',
+          ephemeral: true
+        });
+      }
+
+      const channel = await interaction.guild.channels.create({
+        name: `ticket-${interaction.user.username}`,
+        type: ChannelType.GuildText,
+        parent: ticketData.categoryId,
+        topic: `TicketUser:${interaction.user.id}`,
+        permissionOverwrites: [
+          {
+            id: interaction.guild.roles.everyone.id,
+            deny: [PermissionsBitField.Flags.ViewChannel]
+          },
+          {
+            id: interaction.user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages]
+          },
+          {
+            id: client.user.id,
+            allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages]
+          }
+        ]
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle('🎫 New Ticket')
+        .setDescription(`Category: **${category}**\nUser: <@${interaction.user.id}>`)
+        .setColor('Green')
+        .setTimestamp();
+
+      const closeButton = new ButtonBuilder()
+        .setCustomId('ticket-close')
+        .setLabel('Close Ticket')
+        .setStyle(ButtonStyle.Danger);
+
+      const row = new ActionRowBuilder().addComponents(closeButton);
+
+      await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [row] });
+
+      await interaction.reply({
+        content: `✅ Your ticket has been created: ${channel}`,
+        ephemeral: true
+      });
+    }
+
+    // === Automod GUI Select Menu ===
+    if (interaction.customId === 'automod_config_select') {
+      const selected = interaction.values[0];
+
+      if (selected === 'toggle_links') {
+        let current = db.get(`automod_links_${interaction.guild.id}`) || false;
+        db.set(`automod_links_${interaction.guild.id}`, !current);
+        return interaction.reply({
+          content: `🔗 Link filter is now **${!current ? 'enabled' : 'disabled'}**.`,
+          ephemeral: true
+        });
+      }
+
+      if (selected === 'toggle_badwords') {
+        let current = db.get(`automod_badwords_${interaction.guild.id}`) || false;
+        db.set(`automod_badwords_${interaction.guild.id}`, !current);
+        return interaction.reply({
+          content: `🚫 Bad word filter is now **${!current ? 'enabled' : 'disabled'}**.`,
+          ephemeral: true
+        });
+      }
+
+      if (selected === 'set_bypass_role') {
+        // handled via modal elsewhere
+        return interaction.reply({
+          content: 'Use `/automod set-bypass-role` to define the bypass role.',
+          ephemeral: true
+        });
+      }
+
+      if (selected === 'toggle_external_apps') {
+        let current = db.get(`automod_externalapps_${interaction.guild.id}`) || false;
+        db.set(`automod_externalapps_${interaction.guild.id}`, !current);
+        return interaction.reply({
+          content: `🧩 External App filter is now **${!current ? 'enabled' : 'disabled'}**.`,
+          ephemeral: true
+        });
+      }
+    }
+
+    // === Autorole / Autoresponder GUI Select Menu ===
+    if (interaction.customId === 'autorole_config_select') {
+      const selected = interaction.values[0];
+      if (selected === 'toggle_autorole') {
+        const current = db.get(`autorole_enabled_${interaction.guild.id}`) || false;
+        db.set(`autorole_enabled_${interaction.guild.id}`, !current);
+        return interaction.reply({
+          content: `🔄 Autorole is now **${!current ? 'enabled' : 'disabled'}**.`,
+          ephemeral: true
+        });
+      }
+      if (selected === 'toggle_autoresponder') {
+        const current = db.get(`autoresponder_enabled_${interaction.guild.id}`) || false;
+        db.set(`autoresponder_enabled_${interaction.guild.id}`, !current);
+        return interaction.reply({
+          content: `💬 Autoresponder is now **${!current ? 'enabled' : 'disabled'}**.`,
+          ephemeral: true
+        });
+      }
+    }
+  }
+
+  // === Ticket Close Button ===
+  if (interaction.isButton()) {
+    if (interaction.customId === 'ticket-close') {
+      if (!interaction.channel.topic?.startsWith('TicketUser:')) {
+        return interaction.reply({
+          content: '❌ This is not a ticket channel.',
+          ephemeral: true
+        });
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('📪 Ticket Closed')
+        .setDescription(`Closed by: <@${interaction.user.id}>`)
+        .setColor('Red')
+        .setTimestamp();
+
+      await interaction.channel.send({ embeds: [embed] });
+      setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
     }
   }
 };
