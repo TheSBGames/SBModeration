@@ -1,38 +1,38 @@
-const { ActivityType, Events } = require('discord.js');
-const registerCommands = require('../../utils/registerCommands');
+const { ActivityType } = require('discord.js');
 const logger = require('../../utils/logger');
-const chalk = require('chalk');
-
-// Optional imports for scheduled tasks
-const checkYouTube = require('../../utils/checkYouTube'); // if YouTube Notifier is enabled
+const checkYouTube = require('../../utils/checkYouTube');
+// const connectLavalink = require('../../utils/connectLavalink'); // Uncomment if using music node manager
 
 module.exports = {
-  name: Events.ClientReady,
+  name: 'ready',
   once: true,
 
   async execute(client) {
-    logger.info(`🟢 Bot logged in as ${client.user.tag}`);
+    console.log(`✅ Logged in as ${client.user.tag}`);
+    logger(`Logged in as ${client.user.tag}`);
 
-    // Set presence
+    // Set bot presence
     client.user.setPresence({
       activities: [{ name: 'SB', type: ActivityType.Listening }],
       status: 'online',
     });
 
-    // Register application (slash) commands
-    await registerCommands(client);
-    logger.success('✅ Slash & context commands registered globally');
+    // Register slash commands globally
+    try {
+      await client.application.commands.set(client.slashCommands.map(cmd => cmd.data));
+      logger('✅ Slash commands registered globally.');
+    } catch (err) {
+      console.error('❌ Error registering slash commands:', err);
+    }
 
-    // Log all connected guilds
-    const guilds = client.guilds.cache.map(g => g.name);
-    logger.info(`📌 Connected to ${guilds.length} guild(s): ${guilds.join(', ')}`);
-
-    // OPTIONAL: Start YouTube notification polling
+    // Start polling YouTube for new videos
     setInterval(() => {
-      checkYouTube(client); // polling logic inside this function
-    }, 60 * 1000); // every 60s
+      checkYouTube(client);
+    }, 5 * 60 * 1000); // every 5 minutes
 
-    // Add any other init logic below if needed
-    // e.g., preload cache, reconnect to DB, etc.
-  },
+    // Lavalink connection or music system init (if applicable)
+    // await connectLavalink(client); // optional
+
+    logger('🎵 Bot is ready, presence and polling set.');
+  }
 };
