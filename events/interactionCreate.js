@@ -1,89 +1,114 @@
-const { Events, InteractionType, PermissionFlagsBits } = require('discord.js');
-const handleSelectMenus = require('../components/handlers/selectMenuHandlers');
-const handleButtonInteractions = require('../components/handlers/buttonHandlers');
-const { hasNoPrefixAccess } = require('../utils/noprefix');
-const { clientId } = require('../config.json');
+const { Events, InteractionType } = require('discord.js');
+const config = require('../config.json');
+const log = require('../utils/logger.js');
 
 module.exports = {
   name: Events.InteractionCreate,
+
   async execute(interaction, client) {
-    // SLASH COMMANDS
-    if (interaction.isChatInputCommand()) {
-      const command = client.commands.get(interaction.commandName);
-      if (!command) return;
+    try {
+      // ===== Slash Commands =====
+      if (interaction.isChatInputCommand()) {
+        const command = client.slashCommands.get(interaction.commandName);
+        if (!command) return;
 
-      // Permissions check
-      if (
-        command.userPermissions &&
-        !interaction.member.permissions.has(command.userPermissions)
-      ) {
-        return interaction.reply({
-          content: '🚫 You don’t have permission to use this command.',
-          ephemeral: true,
-        });
+        return command.execute(interaction, client);
       }
 
-      try {
-        await command.execute(interaction, client);
-      } catch (error) {
-        console.error(error);
-        if (interaction.replied || interaction.deferred) {
-          await interaction.followUp({
-            content: '❌ An error occurred while executing this command!',
-            ephemeral: true,
-          });
-        } else {
-          await interaction.reply({
-            content: '❌ An error occurred while executing this command!',
-            ephemeral: true,
-          });
+      // ===== Context Menus =====
+      if (interaction.isUserContextMenuCommand() || interaction.isMessageContextMenuCommand()) {
+        const command = client.slashCommands.get(interaction.commandName);
+        if (!command) return;
+
+        return command.execute(interaction, client);
+      }
+
+      // ===== Buttons =====
+      if (interaction.isButton()) {
+        const id = interaction.customId;
+
+        if (id.startsWith('ticket_')) {
+          return require('../components/buttonhandlers/ticket')(interaction, client);
         }
-      }
-    }
 
-    // CONTEXT MENUS
-    if (interaction.isContextMenuCommand()) {
-      const command = client.commands.get(interaction.commandName);
-      if (!command) return;
-      try {
-        await command.execute(interaction, client);
-      } catch (err) {
-        console.error(err);
-      }
-    }
+        if (id === 'automod_setup') {
+          return require('../components/buttonhandlers/automod')(interaction, client);
+        }
 
-    // BUTTONS
-    if (interaction.isButton()) {
-      try {
-        await handleButtonInteractions(interaction, client);
-      } catch (err) {
-        console.error('Button error:', err);
-      }
-    }
+        if (id === 'ticket_panel_create') {
+          return require('../components/buttonhandlers/ticketPanel')(interaction, client);
+        }
 
-    // SELECT MENUS
-    if (interaction.isStringSelectMenu()) {
-      try {
-        await handleSelectMenus(interaction, client);
-      } catch (err) {
-        console.error('Select menu error:', err);
-      }
-    }
+        if (id === 'transcript_confirm') {
+          return require('../components/buttonhandlers/ticketTranscript')(interaction, client);
+        }
 
-    // MODAL SUBMITS (optional)
-    if (interaction.type === InteractionType.ModalSubmit) {
-      // handle modals if you have any
-    }
+        if (id === 'close_ticket') {
+          return require('../components/buttonhandlers/ticketClose')(interaction, client);
+        }
 
-    // AUTOCOMPLETE
-    if (interaction.isAutocomplete()) {
-      const command = client.commands.get(interaction.commandName);
-      if (!command || !command.autocomplete) return;
-      try {
-        await command.autocomplete(interaction, client);
-      } catch (err) {
-        console.error('Autocomplete error:', err);
+        // Add more buttons here as needed
       }
+
+      // ===== Select Menus =====
+      if (interaction.isStringSelectMenu()) {
+        const id = interaction.customId;
+
+        // ModMail Setup Menu
+        if (id === 'modmail_setup_menu') {
+          return require('../components/selectmenuhandlers/modmail')(interaction, client);
+        }
+
+        if (id === 'modmail_category_select') {
+          return require('../components/selectmenuhandlers/modmailCategory')(interaction);
+        }
+
+        if (id === 'modmail_logchannel_select') {
+          return require('../components/selectmenuhandlers/modmailLogChannel')(interaction);
+        }
+
+        // Automod Setup
+        if (id === 'automod_setup_menu') {
+          return require('../components/selectmenuhandlers/automod')(interaction, client);
+        }
+
+        if (id === 'automod_filter_type') {
+          return require('../components/selectmenuhandlers/automodFilterType')(interaction);
+        }
+
+        // Ticket Category Setup
+        if (id === 'ticket_category_select') {
+          return require('../components/selectmenuhandlers/ticketCategory')(interaction);
+        }
+
+        // Add more select menus as needed
+      }
+
+      // ===== Modal Submissions =====
+      if (interaction.type === InteractionType.ModalSubmit) {
+        const id = interaction.customId;
+
+        if (id === 'modmail_modal') {
+          return require('../components/modalhandlers/modmail')(interaction, client);
+        }
+
+        if (id === 'embed_create_modal') {
+          return require('../components/modalhandlers/embedMessage')(interaction, client);
+        }
+
+        // Add more modals here
+      }
+
+    } catch (error) {
+      console.error(`[Interaction Error]`, error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: '❌ Something went wrong while executing this interaction.', ephemeral: true });
+      } else {
+        await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
+      }
+
+      // Log to console or a log channel
+      log.error('Interaction Error:', error);
     }
-  },
+  }
 };
