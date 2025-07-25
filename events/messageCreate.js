@@ -5,7 +5,9 @@ const autoresponder = require('../utils/autoresponder');
 const modmailSchema = require('../models/modmail');
 const chatgptChannelSchema = require('../models/chatgptChannels');
 const { askChatGPT } = require('../utils/ask-gpt');
+const xpHandler = require('../components/leveling/xpHandler');
 
+xpHandler(client, message);
 module.exports = {
   name: Events.MessageCreate,
 
