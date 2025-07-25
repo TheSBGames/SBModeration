@@ -1,44 +1,62 @@
-const { ButtonStyle, ActionRowBuilder, ButtonBuilder } = require("discord.js");
+const { ButtonStyle, ActionRowBuilder, ButtonBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require("discord.js");
 
 module.exports = {
-  customId: "music-controls",
+  customId: [
+    "pause",
+    "resume",
+    "skip",
+    "stop",
+    "shuffle",
+    "loop",
+    "nowplaying",
+  ],
+  
   async execute(interaction, client) {
     const queue = client.player.nodes.get(interaction.guildId);
     if (!queue || !queue.isPlaying()) {
-      return interaction.reply({ content: "No music is currently playing.", ephemeral: true });
+      return interaction.reply({ content: "❌ No music is currently playing.", ephemeral: true });
     }
 
-    const btn = interaction.customId;
-
-    switch (btn) {
+    switch (interaction.customId) {
       case "pause":
         queue.node.pause();
-        return interaction.update({ content: "⏸️ Paused the music." });
+        return interaction.reply({ content: "⏸️ Music paused." });
 
       case "resume":
         queue.node.resume();
-        return interaction.update({ content: "▶️ Resumed the music." });
+        return interaction.reply({ content: "▶️ Music resumed." });
 
       case "skip":
         queue.node.skip();
-        return interaction.update({ content: "⏭️ Skipped the current track." });
+        return interaction.reply({ content: "⏭️ Skipped to the next track." });
 
       case "stop":
         queue.node.stop();
-        return interaction.update({ content: "⏹️ Stopped playback and cleared the queue." });
+        return interaction.reply({ content: "⏹️ Stopped music and cleared the queue." });
 
       case "shuffle":
         queue.tracks.shuffle();
-        return interaction.update({ content: "🔀 Shuffled the queue." });
+        return interaction.reply({ content: "🔀 Queue shuffled." });
 
       case "loop":
-        const current = queue.repeatMode;
-        const newMode = current === 0 ? 1 : 0;
+        const mode = queue.repeatMode;
+        const newMode = mode === 0 ? 1 : 0;
         queue.setRepeatMode(newMode);
-        return interaction.update({ content: `🔁 Loop ${newMode === 1 ? "enabled" : "disabled"}.` });
+        return interaction.reply({ content: `🔁 Loop is now **${newMode === 1 ? "enabled" : "disabled"}**.` });
 
-      default:
-        return interaction.reply({ content: "Unknown button interaction.", ephemeral: true });
+      case "nowplaying":
+        const currentTrack = queue.currentTrack;
+        return interaction.reply({
+          embeds: [
+            {
+              title: "🎶 Now Playing",
+              description: `[${currentTrack.title}](${currentTrack.url})\nDuration: \`${currentTrack.duration}\``,
+              thumbnail: { url: currentTrack.thumbnail },
+              color: 0x5865f2
+            },
+          ],
+          ephemeral: true,
+        });
     }
   },
 };
